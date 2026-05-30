@@ -261,10 +261,70 @@ def get_stats():
 
 # ===== IA — Sprint 2 =====
 
+SYSTEM_PROMPT = """Tu es un Coach Agile expert spécialisé dans la gestion de produits et la méthodologie Scrum.
+Quand on te donne le titre et la description d'un ticket (User Story), retourne UNIQUEMENT un objet JSON valide avec ces 3 champs :
+
+- "criteria" : liste de 3 à 5 critères d'acceptation précis et testables
+- "points" : entier parmi [1, 2, 3, 5, 8, 13] estimant la complexité (suite de Fibonacci)
+- "priority" : exactement "urgent", "bloquant" ou "normal" selon l'impact métier
+
+Règles story points : 1-2=simple(<2h), 3=moyen(demi-journée), 5=complexe(journée), 8=très complexe(plusieurs jours), 13=massif(à découper)
+Règles priorité : urgent=impacte utilisateur/revenu directement, bloquant=d'autres tâches en dépendent, normal=important mais ne bloque rien
+
+Réponds UNIQUEMENT avec le JSON brut, sans markdown ni texte autour."""
+
+
 @app.route("/ai/analyze", methods=["POST"])
 def analyze():
-    return jsonify({"error": "IA non encore configurée — Sprint 2"}), 501
+    import os
+    from openai import OpenAI
 
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "Clé API OpenAI manquante — définir OPENAI_API_KEY"}), 500
 
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    data        = request.json or {}
+    title       = str(data.get("title",       "")).strip()[:200]
+    description = str(data.get("description", "")).strip()[:1000]
+
+    if not title:
+        return jsonify({"error": "Le titre est requis"}), 400
+
+    user_message = f"Titre du ticket : {title}"
+    if description:
+        user_message += f"\nDescription : {description}"
+
+    try:
+        client   = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": user_message}
+            ],
+            temperature=0.4,
+            max_tokens=600
+        )
+
+        result   = json.loads(response.choices[0].message.content)
+
+        criteria = result.get("criteria", [])
+        if not isinstance(criteria, list):
+            criteria = []
+        criteria = [str(c) for c in criteria[:5]]
+
+        points = result.get("points", 3)
+        if points not in [1, 2, 3, 5, 8, 13]:
+            points = 3
+
+        priority = result.get("priority", "normal")
+        if priority not in ["urgent", "bloquant", "normal"]:
+            priority = "normal"
+
+        return jsonify({"criteria": criteria, "points": points, "priority": priority})
+
+    except json.JSONDecodeError:
+        return jsonify({"error": "Réponse IA invalide"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Erreur OpenAI : {str(e)}"}), 500
